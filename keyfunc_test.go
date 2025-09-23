@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/MicahParks/jwkset"
@@ -296,5 +297,85 @@ func TestNoKIDHeaderNoMatchingJWK(t *testing.T) {
 	_, err = jwt.Parse(tokenString, k.KeyfuncCtx(ctx))
 	if err == nil {
 		t.Fatalf("Expected error due to no matching JWK, but got none")
+	}
+}
+
+func TestAllowedAlgorithms_AllowsMatchingAlg(t *testing.T) {
+	ctx := context.Background()
+
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("Failed to generate ED25519 key pair: %v", err)
+	}
+
+	jwk, err := jwkset.NewJWKFromKey(priv, jwkset.JWKOptions{Metadata: jwkset.JWKMetadataOptions{KID: keyID, USE: jwkset.UseSig}})
+	if err != nil {
+		t.Fatalf("Failed to create JWK: %v", err)
+	}
+	store := jwkset.NewMemoryStorage()
+	if err := store.KeyWrite(ctx, jwk); err != nil {
+		t.Fatalf("Failed to write JWK: %v", err)
+	}
+
+	k, err := New(Options{Ctx: ctx, Storage: store, AllowedAlgorithms: []string{"EdDSA"}})
+	if err != nil {
+		t.Fatalf("Failed to create Keyfunc: %v", err)
+	}
+
+	token := jwt.New(jwt.SigningMethodEdDSA)
+	token.Header[jwkset.HeaderKID] = keyID
+	signed, err := token.SignedString(priv)
+	if err != nil {
+		t.Fatalf("Failed to sign token: %v", err)
+	}
+
+	parsed, err := jwt.Parse(signed, k.Keyfunc)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if !parsed.Valid {
+		t.Fatalf("Expected token to be valid")
+	}
+}
+
+func TestAllowedAlgorithms_RejectsNonMatchingAlg(t *testing.T) {
+	ctx := context.Background()
+
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("Failed to generate ED25519 key pair: %v", err)
+	}
+
+	jwk, err := jwkset.NewJWKFromKey(priv, jwkset.JWKOptions{Metadata: jwkset.JWKMetadataOptions{KID: keyID, USE: jwkset.UseSig}})
+	if err != nil {
+		t.Fatalf("Failed to create JWK: %v", err)
+	}
+	store := jwkset.NewMemoryStorage()
+	if err := store.KeyWrite(ctx, jwk); err != nil {
+		t.Fatalf("Failed to write JWK: %v", err)
+	}
+
+	// Create Keyfunc with AllowedAlgorithms that does NOT include EdDSA.
+	k, err := New(Options{Ctx: ctx, Storage: store, AllowedAlgorithms: []string{"RS256"}})
+	if err != nil {
+		t.Fatalf("Failed to create Keyfunc: %v", err)
+	}
+
+	token := jwt.New(jwt.SigningMethodEdDSA)
+	token.Header[jwkset.HeaderKID] = keyID
+	signed, err := token.SignedString(priv)
+	if err != nil {
+		t.Fatalf("Failed to sign token: %v", err)
+	}
+
+	_, err = jwt.Parse(signed, k.Keyfunc)
+	if err == nil {
+		t.Fatalf("Expected error due to disallowed alg, got none")
+	}
+	if !errors.Is(err, ErrKeyfunc) {
+		t.Fatalf("Expected ErrKeyfunc, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "could not find alg") {
+		t.Fatalf("Expected error to mention disallowed alg, got: %v", err)
 	}
 }
